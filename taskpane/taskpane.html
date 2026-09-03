@@ -18,6 +18,19 @@
       <div id="conn-badge" class="badge badge-off">…</div>
     </header>
 
+    <section id="waiting-banner" class="waiting-banner hidden">
+      <div class="spinner"></div>
+      <div id="txt-waiting" class="waiting-text">Server is full right now — waiting for a spot to free up…</div>
+    </section>
+
+    <section class="name-card">
+      <label id="txt-label-name" for="input-name">Your name in the game</label>
+      <div class="name-row">
+        <input id="input-name" type="text" maxlength="24" placeholder="Player" />
+        <button id="btn-save-name" class="btn-primary btn-compact" data-i18n="btn-save">Save</button>
+      </div>
+    </section>
+
     <section class="counter-card">
       <div class="counter-value" id="letter-count">0</div>
       <div class="counter-label" id="txt-letters-label">letters earned</div>

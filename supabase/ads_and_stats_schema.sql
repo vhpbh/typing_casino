@@ -8,11 +8,15 @@
 
 create table if not exists public.typing_stats (
   user_id uuid primary key references auth.users(id) on delete cascade,
+  display_name text,
   letters_typed bigint not null default 0,
   words_typed bigint not null default 0,
   first_seen timestamptz not null default now(),
   last_seen timestamptz not null default now()
 );
+
+-- Running an older install that already has this table? uncomment/run once:
+-- alter table public.typing_stats add column if not exists display_name text;
 
 create table if not exists public.ads (
   id uuid primary key default gen_random_uuid(),
@@ -107,6 +111,46 @@ begin
 end;
 $$;
 
+create or replace function public.get_my_stats()
+returns table (
+  display_name text,
+  letters_typed bigint,
+  words_typed bigint
+)
+language sql
+security definer
+set search_path = public
+as $$
+  select ts.display_name, ts.letters_typed, ts.words_typed
+  from public.typing_stats ts
+  where ts.user_id = auth.uid();
+$$;
+
+create or replace function public.set_display_name(p_name text)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  clean_name text;
+begin
+  if auth.uid() is null then
+    raise exception 'not authenticated';
+  end if;
+
+  clean_name := nullif(trim(p_name), '');
+  if clean_name is not null and length(clean_name) > 24 then
+    clean_name := substring(clean_name from 1 for 24);
+  end if;
+
+  insert into public.typing_stats (user_id, display_name)
+  values (auth.uid(), clean_name)
+  on conflict (user_id) do update
+    set display_name = excluded.display_name;
+end;
+$$;
+
 create or replace function public.register_ad_click(p_ad_id uuid)
 returns void
 language plpgsql
@@ -126,6 +170,7 @@ $$;
 create or replace function public.admin_list_users()
 returns table (
   user_id uuid,
+  display_name text,
   letters_typed bigint,
   words_typed bigint,
   first_seen timestamptz,
@@ -135,7 +180,7 @@ language sql
 security definer
 set search_path = public
 as $$
-  select ts.user_id, ts.letters_typed, ts.words_typed, ts.first_seen, ts.last_seen
+  select ts.user_id, ts.display_name, ts.letters_typed, ts.words_typed, ts.first_seen, ts.last_seen
   from public.typing_stats ts
   where public.is_admin()
   order by ts.last_seen desc;

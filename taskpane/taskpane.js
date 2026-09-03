@@ -9,25 +9,53 @@
  *     are therefore approximated:
  *       - Spelling: checked against bundled offline dictionaries (see
  *         spellcheck.js) instead of Word's own proofing engine.
- *       - Typed vs. pasted: a short-interval polling loop diffs the
- *         document's text. A large chunk of new text appearing between two
- *         polls (many words at once) is treated as a paste and excluded.
- *         A human typing normally only ever adds a word or two between
- *         polls, so this is a reliable heuristic in practice but not a
- *         mathematical guarantee.
+ *       - Typed vs. pasted: a short-interval LOCAL polling loop (no server
+ *         calls involved) diffs the document's text. A large chunk of new
+ *         text appearing between two polls (many words at once) is treated
+ *         as a paste and excluded. A human typing normally only ever adds
+ *         a word or two between polls, so this is a reliable heuristic in
+ *         practice but not a mathematical guarantee.
  *  2. If text is edited in the *middle* of the document (not appended at
  *     the end), this build simply re-syncs its baseline on the next poll
- *     without counting or penalizing anything from that edit. Extending
- *     this to fully track mid-document edits is possible but out of scope
- *     for this build.
+ *     without counting or penalizing anything from that edit.
+ *
+ * SERVER-LOAD / SCALE DESIGN (read before changing the numbers below):
+ *  - Word-counting and paste-detection are 100% local (Word.run calls stay
+ *    on-device; they never touch Supabase). Only three things ever hit the
+ *    network: (a) one Realtime "room" connection per active user used to
+ *    both gate concurrency AND announce presence, (b) an infrequent batched
+ *    progress sync, and (c) reading/clicking the single ad slot.
+ *  - Concurrency gate: Supabase's free plan caps Realtime at 200 concurrent
+ *    connections project-wide. Rather than build a separate queuing table
+ *    (which would itself cost reads/writes for every single user), this
+ *    add-in *reuses that exact limit as the gate*: every active user holds
+ *    one Realtime "presence" channel open. If the project is already at
+ *    capacity, the connection attempt fails; the add-in then shows the
+ *    waiting indicator and retries with backoff until a slot opens up -
+ *    exactly the "201st user waits for the 1st to leave" behavior asked
+ *    for, with zero extra database load.
+ *  - Progress sync is batched to once a minute AND skipped entirely if
+ *    nothing changed since the last sync, so an idle or slow typist costs
+ *    the server nothing. A best-effort final sync also fires on page
+ *    unload so the very last few words aren't lost.
+ *  - The anonymous auth session is reused across app opens (Supabase persists
+ *    it in local storage) instead of calling signInAnonymously() every time,
+ *    which would otherwise silently create a brand-new user row - and count
+ *    against the project's monthly-active-users quota - on every single
+ *    open of the panel.
  */
 (function () {
   "use strict";
 
-  var POLL_MS = 300;
+  var POLL_MS = 300; // local only, no server cost
   var PASTE_CHAR_THRESHOLD = 25;
   var PASTE_MIN_TOKENS = 3;
-  var SYNC_EVERY_MS = 3000;
+  var SYNC_EVERY_MS = 60000; // batch progress sync to once a minute
+  var AD_CACHE_MS = 5 * 60 * 1000; // reuse the last-fetched ad for 5 minutes
+  var ROOM_CHANNEL_NAME = "typing-casino-room";
+  var BACKOFF_START_MS = 3000;
+  var BACKOFF_MAX_MS = 30000;
+  var BACKOFF_FACTOR = 1.6;
 
   var state = {
     lastText: "",
@@ -36,9 +64,14 @@
     wordsCount: 0,
     skippedMisspelled: 0,
     skippedPasted: 0,
+    lastSyncedLetters: -1,
+    lastSyncedWords: -1,
     lastSyncAt: 0,
     sb: null, // supabase client
     userId: null,
+    roomConnected: false,
+    roomChannel: null,
+    roomBackoff: BACKOFF_START_MS,
   };
 
   var el = {};
@@ -49,11 +82,14 @@
     el.skippedMisspelled = document.getElementById("skipped-misspelled");
     el.skippedPasted = document.getElementById("skipped-pasted");
     el.connBadge = document.getElementById("conn-badge");
+    el.waitingBanner = document.getElementById("waiting-banner");
     el.setupPanel = document.getElementById("setup-panel");
     el.btnOpenSetup = document.getElementById("btn-open-setup");
     el.btnSaveSetup = document.getElementById("btn-save-setup");
     el.inputUrl = document.getElementById("input-url");
     el.inputKey = document.getElementById("input-key");
+    el.inputName = document.getElementById("input-name");
+    el.btnSaveName = document.getElementById("btn-save-name");
     el.adSlot = document.getElementById("ad-slot");
     el.adImage = document.getElementById("ad-image");
     el.adLink = document.getElementById("ad-link");
@@ -66,9 +102,12 @@
     el.skippedPasted.textContent = state.skippedPasted.toLocaleString();
   }
 
-  function setConnBadge(connected) {
-    el.connBadge.textContent = window.I18N.t(connected ? "conn-on" : "conn-off");
-    el.connBadge.className = "badge " + (connected ? "badge-on" : "badge-off");
+  // status: "off" | "waiting" | "on"
+  function setConnBadge(status) {
+    var key = status === "on" ? "conn-on" : status === "waiting" ? null : "conn-off";
+    el.connBadge.textContent = key ? window.I18N.t(key) : window.I18N.t("waiting-text").slice(0, 24) + "…";
+    el.connBadge.className = "badge " + (status === "on" ? "badge-on" : status === "waiting" ? "badge-off" : "badge-off");
+    el.waitingBanner.classList.toggle("hidden", status !== "waiting");
   }
 
   // ---- Word.js: read the whole document body as plain text ----
@@ -95,10 +134,6 @@
   function processSegment(segment, isPaste) {
     state.pendingBuffer += segment;
 
-    // Split into tokens; the LAST token might still be mid-typing (no
-    // trailing whitespace yet), so keep it in the buffer for next time -
-    // UNLESS the buffer itself ends in whitespace, meaning every token in
-    // it is actually complete.
     var endsWithBoundary = /\s$/.test(state.pendingBuffer);
     var tokens = tokenize(state.pendingBuffer);
 
@@ -107,7 +142,7 @@
 
     completed.forEach(function (raw) {
       var word = cleanToken(raw);
-      if (!word) return; // pure punctuation/number token, ignore silently
+      if (!word) return;
 
       if (isPaste) {
         state.skippedPasted++;
@@ -125,22 +160,17 @@
 
   function diffAndProcess(currentText) {
     var last = state.lastText;
-
     if (currentText === last) return;
 
     if (currentText.indexOf(last) === 0) {
-      // Simple, common case: pure append (typing or pasting at the end).
       var segment = currentText.slice(last.length);
       var segTokens = tokenize(segment);
       var looksLikePaste =
-        segment.length > PASTE_CHAR_THRESHOLD && segTokens.length >= 2 ||
+        (segment.length > PASTE_CHAR_THRESHOLD && segTokens.length >= 2) ||
         segTokens.length >= PASTE_MIN_TOKENS;
       processSegment(segment, looksLikePaste);
-    } else {
-      // Edit happened somewhere other than the very end (mid-document edit
-      // or a deletion). We don't try to reconstruct exactly what changed;
-      // just resync the baseline. See file header note #2.
     }
+    // Edits elsewhere in the document: just resync, see file header note #2.
 
     state.lastText = currentText;
   }
@@ -164,7 +194,7 @@
       });
   }
 
-  // ---- Supabase: identity, progress sync, ad slot ----
+  // ---- Local settings (Office roaming settings; no server cost) ----
   function loadSupabaseSettings() {
     return new Promise(function (resolve) {
       Office.context.roamingSettings.get
@@ -182,43 +212,118 @@
     Office.context.roamingSettings.saveAsync();
   }
 
-  function initSupabase(url, key) {
-    if (!url || !key) {
-      setConnBadge(false);
-      return Promise.resolve();
+  // ---- Auth: reuse the persisted anonymous session instead of minting a
+  //      brand-new user (and burning a monthly-active-user slot) every time
+  //      the panel is opened. ----
+  function ensureSession() {
+    return state.sb.auth.getSession().then(function (res) {
+      var session = res.data && res.data.session;
+      if (session && session.user) {
+        return session.user.id;
+      }
+      return state.sb.auth.signInAnonymously().then(function (signInRes) {
+        if (signInRes.error) throw signInRes.error;
+        return signInRes.data.user.id;
+      });
+    });
+  }
+
+  // ---- Realtime "room": doubles as the concurrency gate and presence ----
+  function connectToRoom() {
+    if (state.roomChannel) {
+      state.sb.removeChannel(state.roomChannel);
+      state.roomChannel = null;
     }
-    state.sb = window.supabase.createClient(url, key);
-    return state.sb.auth
-      .signInAnonymously()
-      .then(function (res) {
-        if (res.error) throw res.error;
-        state.userId = res.data.user.id;
-        setConnBadge(true);
-        loadAd();
-      })
-      .catch(function (err) {
-        console.error("Typing Casino: Supabase connection failed", err);
-        setConnBadge(false);
-      });
+
+    setConnBadge(state.roomBackoff === BACKOFF_START_MS ? "off" : "waiting");
+
+    var channel = state.sb.channel(ROOM_CHANNEL_NAME, {
+      config: { presence: { key: state.userId } },
+    });
+    state.roomChannel = channel;
+
+    channel.subscribe(function (status) {
+      if (status === "SUBSCRIBED") {
+        channel.track({ online_at: new Date().toISOString() });
+        state.roomBackoff = BACKOFF_START_MS;
+        state.roomConnected = true;
+        setConnBadge("on");
+        onRoomConnected();
+      } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
+        state.roomConnected = false;
+        setConnBadge("waiting");
+        scheduleRoomRetry();
+      }
+    });
   }
 
-  function maybeSync() {
-    if (!state.sb || !state.userId) return;
+  function scheduleRoomRetry() {
+    var delay = state.roomBackoff + Math.random() * 500;
+    state.roomBackoff = Math.min(state.roomBackoff * BACKOFF_FACTOR, BACKOFF_MAX_MS);
+    setTimeout(connectToRoom, delay);
+  }
+
+  // Runs once, the first time this session successfully claims a room slot.
+  var roomConnectedOnce = false;
+  function onRoomConnected() {
+    if (roomConnectedOnce) return;
+    roomConnectedOnce = true;
+    loadMyStats();
+    loadAd();
+  }
+
+  // ---- Progress sync (batched + change-gated) ----
+  function maybeSync(force) {
+    if (!state.sb || !state.userId || !state.roomConnected) return;
     var now = Date.now();
-    if (now - state.lastSyncAt < SYNC_EVERY_MS) return;
+    if (!force && now - state.lastSyncAt < SYNC_EVERY_MS) return;
+    if (state.lettersCount === state.lastSyncedLetters && state.wordsCount === state.lastSyncedWords) {
+      return; // nothing changed - skip the call entirely
+    }
     state.lastSyncAt = now;
+    var letters = state.lettersCount;
+    var words = state.wordsCount;
     state.sb
-      .rpc("log_typing_progress", {
-        p_letters: state.lettersCount,
-        p_words: state.wordsCount,
-      })
+      .rpc("log_typing_progress", { p_letters: letters, p_words: words })
       .then(function (res) {
-        if (res.error) console.error("Typing Casino: sync failed", res.error);
+        if (res.error) {
+          console.error("Typing Casino: sync failed", res.error);
+          return;
+        }
+        state.lastSyncedLetters = letters;
+        state.lastSyncedWords = words;
       });
   }
 
+  // Pull this user's previously-saved totals + name once per session, so
+  // reopening the panel doesn't visually reset progress to zero (the server
+  // never lost it - the local counter just didn't know about it yet).
+  function loadMyStats() {
+    state.sb.rpc("get_my_stats").then(function (res) {
+      if (res.error || !res.data || !res.data.length) return;
+      var row = res.data[0];
+      if (row.display_name) el.inputName.value = row.display_name;
+      state.lettersCount = Math.max(state.lettersCount, Number(row.letters_typed) || 0);
+      state.wordsCount = Math.max(state.wordsCount, Number(row.words_typed) || 0);
+      state.lastSyncedLetters = state.lettersCount;
+      state.lastSyncedWords = state.wordsCount;
+      render();
+    });
+  }
+
+  // ---- Ad slot (fetched once per session, cached briefly across reopens) ----
   function loadAd() {
-    if (!state.sb) return;
+    var cacheRaw = sessionStorage.getItem("tc_ad_cache");
+    if (cacheRaw) {
+      try {
+        var cached = JSON.parse(cacheRaw);
+        if (Date.now() - cached.at < AD_CACHE_MS) {
+          showAd(cached.ad);
+          return;
+        }
+      } catch (e) { /* ignore malformed cache */ }
+    }
+
     state.sb
       .from("ads")
       .select("id, image_url, target_url")
@@ -228,21 +333,43 @@
       .then(function (res) {
         if (res.error || !res.data || !res.data.length) return;
         var ad = res.data[0];
-        el.adImage.src = ad.image_url;
-        el.adLink.href = ad.target_url;
-        el.adSlot.style.display = "block";
-        el.adLink.onclick = function () {
-          state.sb.rpc("register_ad_click", { p_ad_id: ad.id }).then(function () {});
-          // navigation proceeds normally (target="_blank"); we don't block it
-        };
+        sessionStorage.setItem("tc_ad_cache", JSON.stringify({ ad: ad, at: Date.now() }));
+        showAd(ad);
       });
   }
 
-  // ---- Settings UI ----
+  function showAd(ad) {
+    el.adImage.src = ad.image_url;
+    el.adLink.href = ad.target_url;
+    el.adSlot.style.display = "block";
+    el.adLink.onclick = function () {
+      state.sb.rpc("register_ad_click", { p_ad_id: ad.id }).then(function () {});
+    };
+  }
+
+  // ---- Display name ----
+  function wireNameUi() {
+    el.btnSaveName.addEventListener("click", function () {
+      var name = el.inputName.value.trim();
+      if (!state.sb || !state.userId) return;
+      state.sb.rpc("set_display_name", { p_name: name }).then(function (res) {
+        if (res.error) {
+          console.error("Typing Casino: could not save name", res.error);
+          return;
+        }
+        var original = el.btnSaveName.textContent;
+        el.btnSaveName.textContent = window.I18N.t("name-saved");
+        setTimeout(function () {
+          el.btnSaveName.textContent = original;
+        }, 1200);
+      });
+    });
+  }
+
+  // ---- Setup UI ----
   function wireSettingsUi() {
     el.btnOpenSetup.addEventListener("click", function () {
       var isHidden = el.setupPanel.classList.contains("hidden");
-      el.setupPanel.classList.toggle("hidden", !isHidden ? true : false);
       el.setupPanel.classList[isHidden ? "remove" : "add"]("hidden");
       el.btnOpenSetup.textContent = isHidden
         ? window.I18N.t("btn-hide-settings")
@@ -261,12 +388,44 @@
     });
   }
 
+  function initSupabase(url, key) {
+    if (!url || !key) {
+      setConnBadge("off");
+      return Promise.resolve();
+    }
+    state.sb = window.supabase.createClient(url, key);
+    return ensureSession()
+      .then(function (userId) {
+        state.userId = userId;
+        state.roomBackoff = BACKOFF_START_MS;
+        connectToRoom();
+      })
+      .catch(function (err) {
+        console.error("Typing Casino: Supabase connection failed", err);
+        setConnBadge("off");
+      });
+  }
+
+  // Best-effort final sync so the last unsynced words aren't lost. This is
+  // "fire and forget" - the page may close before it completes, and that's
+  // an acceptable tradeoff against polling the server more often.
+  function wireFinalSync() {
+    document.addEventListener("visibilitychange", function () {
+      if (document.visibilityState === "hidden") maybeSync(true);
+    });
+    window.addEventListener("pagehide", function () {
+      maybeSync(true);
+    });
+  }
+
   // ---- Boot ----
   Office.onReady(function () {
     window.I18N.applyStaticText();
     cacheEls();
     wireSettingsUi();
-    setConnBadge(false);
+    wireNameUi();
+    wireFinalSync();
+    setConnBadge("off");
 
     window.Spellcheck.init();
 

@@ -27,6 +27,10 @@
       "btn-settings": "Settings",
       "btn-hide-settings": "Hide settings",
       "alert-fill-fields": "Please fill in both fields.",
+      "waiting-text": "Server is full right now (200 players connected) — waiting for a spot to free up…",
+      "label-name": "Your name in the game",
+      "name-placeholder": "Player",
+      "name-saved": "Saved!",
     },
     he: {
       "app-title": "קזינו ההקלדה",
@@ -43,6 +47,10 @@
       "btn-settings": "הגדרות",
       "btn-hide-settings": "הסתרת הגדרות",
       "alert-fill-fields": "יש למלא את שני השדות.",
+      "waiting-text": "השרת מלא כרגע (200 שחקנים מחוברים) — ממתינים לפינוי מקום…",
+      "label-name": "השם שלך במשחק",
+      "name-placeholder": "שחקן",
+      "name-saved": "נשמר!",
     },
   };
 
@@ -79,6 +87,8 @@
       "txt-setup-intro": "setup-intro",
       "txt-label-url": "label-url",
       "txt-label-key": "label-key",
+      "txt-waiting": "waiting-text",
+      "txt-label-name": "label-name",
     };
 
     Object.keys(map).forEach(function (elId) {
@@ -91,6 +101,12 @@
 
     var settingsBtn = document.getElementById("btn-open-setup");
     if (settingsBtn) settingsBtn.textContent = t("btn-settings");
+
+    var saveNameBtn = document.getElementById("btn-save-name");
+    if (saveNameBtn) saveNameBtn.textContent = t("btn-save");
+
+    var nameInput = document.getElementById("input-name");
+    if (nameInput) nameInput.placeholder = t("name-placeholder");
   }
 
   // Exposed globally for taskpane.js
