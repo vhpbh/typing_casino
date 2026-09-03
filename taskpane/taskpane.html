@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="X-UA-Compatible" content="IE=Edge" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Typing Casino</title>
+  <link rel="stylesheet" href="taskpane.css" />
+  <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+  <script src="vendor.bundle.js"></script>
+</head>
+<body id="body" dir="ltr">
+
+  <div id="app" class="app">
+
+    <header class="header">
+      <h1 id="txt-title">Typing Casino</h1>
+      <div id="conn-badge" class="badge badge-off">…</div>
+    </header>
+
+    <section class="counter-card">
+      <div class="counter-value" id="letter-count">0</div>
+      <div class="counter-label" id="txt-letters-label">letters earned</div>
+      <div class="counter-sub" id="words-count-line">
+        <span id="words-count">0</span>
+        <span id="txt-words-label">valid words</span>
+      </div>
+    </section>
+
+    <section class="stats-row">
+      <div class="stat">
+        <div class="stat-value" id="skipped-misspelled">0</div>
+        <div class="stat-label" id="txt-skipped-misspelled">skipped (misspelled)</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value" id="skipped-pasted">0</div>
+        <div class="stat-label" id="txt-skipped-pasted">skipped (pasted)</div>
+      </div>
+    </section>
+
+    <section id="setup-panel" class="setup-panel hidden">
+      <p id="txt-setup-intro">Connect this add-in to your Supabase project once (ask your administrator for these values).</p>
+      <label id="txt-label-url">Supabase URL</label>
+      <input id="input-url" type="text" placeholder="https://xxxx.supabase.co" />
+      <label id="txt-label-key">Supabase anon key</label>
+      <input id="input-key" type="text" placeholder="eyJhbGciOi..." />
+      <button id="btn-save-setup" class="btn-primary" data-i18n="btn-save">Save</button>
+    </section>
+
+    <button id="btn-open-setup" class="link-btn" data-i18n="btn-settings">Settings</button>
+
+    <footer class="ad-slot" id="ad-slot" style="display:none;">
+      <a id="ad-link" href="#" target="_blank" rel="noopener noreferrer">
+        <img id="ad-image" alt="advertisement" />
+      </a>
+    </footer>
+
+  </div>
+
+  <script src="i18n.js"></script>
+  <script src="spellcheck.js"></script>
+  <script src="taskpane.js"></script>
+</body>
+</html>
