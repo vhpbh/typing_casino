@@ -57,6 +57,14 @@
   var BACKOFF_MAX_MS = 30000;
   var BACKOFF_FACTOR = 1.6;
 
+  // Baked-in project connection, so end users never have to paste anything.
+  // The anon key is meant to be public (Row Level Security does the actual
+  // access control on the server) - this is the normal, supported way to
+  // ship a Supabase anon key inside client-side code.
+  var DEFAULT_SUPABASE_URL = "https://cspianjmvwubayrhgcde.supabase.co";
+  var DEFAULT_SUPABASE_ANON_KEY =
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNzcGlhbmptdnd1YmF5cmhnY2RlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODU2NTgyNTAsImV4cCI6MjEwMTIzNDI1MH0.4fJi68MPa8Bx8qOlHHLiVQKN09zXK89grbo0xxOplTo";
+
   var state = {
     lastText: "",
     pendingBuffer: "",
@@ -83,11 +91,6 @@
     el.skippedPasted = document.getElementById("skipped-pasted");
     el.connBadge = document.getElementById("conn-badge");
     el.waitingBanner = document.getElementById("waiting-banner");
-    el.setupPanel = document.getElementById("setup-panel");
-    el.btnOpenSetup = document.getElementById("btn-open-setup");
-    el.btnSaveSetup = document.getElementById("btn-save-setup");
-    el.inputUrl = document.getElementById("input-url");
-    el.inputKey = document.getElementById("input-key");
     el.inputName = document.getElementById("input-name");
     el.btnSaveName = document.getElementById("btn-save-name");
     el.adSlot = document.getElementById("ad-slot");
@@ -194,22 +197,11 @@
       });
   }
 
-  // ---- Local settings (Office roaming settings; no server cost) ----
+  // ---- Fixed project connection (no override, no settings UI) ----
+  // This add-in is intentionally wired to one specific Supabase project and
+  // nothing else - there is no user-facing way to point it elsewhere.
   function loadSupabaseSettings() {
-    return new Promise(function (resolve) {
-      Office.context.roamingSettings.get
-        ? resolve({
-            url: Office.context.roamingSettings.get("sb_url"),
-            key: Office.context.roamingSettings.get("sb_key"),
-          })
-        : resolve({ url: null, key: null });
-    });
-  }
-
-  function saveSupabaseSettings(url, key) {
-    Office.context.roamingSettings.set("sb_url", url);
-    Office.context.roamingSettings.set("sb_key", key);
-    Office.context.roamingSettings.saveAsync();
+    return Promise.resolve({ url: DEFAULT_SUPABASE_URL, key: DEFAULT_SUPABASE_ANON_KEY });
   }
 
   // ---- Auth: reuse the persisted anonymous session instead of minting a
@@ -366,28 +358,6 @@
     });
   }
 
-  // ---- Setup UI ----
-  function wireSettingsUi() {
-    el.btnOpenSetup.addEventListener("click", function () {
-      var isHidden = el.setupPanel.classList.contains("hidden");
-      el.setupPanel.classList[isHidden ? "remove" : "add"]("hidden");
-      el.btnOpenSetup.textContent = isHidden
-        ? window.I18N.t("btn-hide-settings")
-        : window.I18N.t("btn-settings");
-    });
-
-    el.btnSaveSetup.addEventListener("click", function () {
-      var url = el.inputUrl.value.trim();
-      var key = el.inputKey.value.trim();
-      if (!url || !key) {
-        alert(window.I18N.t("alert-fill-fields"));
-        return;
-      }
-      saveSupabaseSettings(url, key);
-      initSupabase(url, key);
-    });
-  }
-
   function initSupabase(url, key) {
     if (!url || !key) {
       setConnBadge("off");
@@ -422,7 +392,6 @@
   Office.onReady(function () {
     window.I18N.applyStaticText();
     cacheEls();
-    wireSettingsUi();
     wireNameUi();
     wireFinalSync();
     setConnBadge("off");
@@ -430,11 +399,7 @@
     window.Spellcheck.init();
 
     loadSupabaseSettings().then(function (settings) {
-      if (settings.url) el.inputUrl.value = settings.url;
-      if (settings.key) el.inputKey.value = settings.key;
-      if (settings.url && settings.key) {
-        initSupabase(settings.url, settings.key);
-      }
+      initSupabase(settings.url, settings.key);
     });
 
     readDocumentText()

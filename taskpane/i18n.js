@@ -20,13 +20,7 @@
       "skipped-pasted": "skipped (pasted)",
       "conn-on": "connected",
       "conn-off": "not connected",
-      "setup-intro": "Connect this add-in to your Supabase project once (ask your administrator for these values).",
-      "label-url": "Supabase URL",
-      "label-key": "Supabase anon key",
       "btn-save": "Save",
-      "btn-settings": "Settings",
-      "btn-hide-settings": "Hide settings",
-      "alert-fill-fields": "Please fill in both fields.",
       "waiting-text": "Server is full right now (200 players connected) — waiting for a spot to free up…",
       "label-name": "Your name in the game",
       "name-placeholder": "Player",
@@ -40,13 +34,7 @@
       "skipped-pasted": "לא נספרו (הודבקו)",
       "conn-on": "מחובר",
       "conn-off": "לא מחובר",
-      "setup-intro": "חברו את התוסף לפרויקט ה-Supabase שלכם (יש לקבל את הפרטים הבאים ממנהל המערכת).",
-      "label-url": "כתובת Supabase (URL)",
-      "label-key": "מפתח anon של Supabase",
       "btn-save": "שמירה",
-      "btn-settings": "הגדרות",
-      "btn-hide-settings": "הסתרת הגדרות",
-      "alert-fill-fields": "יש למלא את שני השדות.",
       "waiting-text": "השרת מלא כרגע (200 שחקנים מחוברים) — ממתינים לפינוי מקום…",
       "label-name": "השם שלך במשחק",
       "name-placeholder": "שחקן",
@@ -84,9 +72,6 @@
       "txt-words-label": "words-label",
       "txt-skipped-misspelled": "skipped-misspelled",
       "txt-skipped-pasted": "skipped-pasted",
-      "txt-setup-intro": "setup-intro",
-      "txt-label-url": "label-url",
-      "txt-label-key": "label-key",
       "txt-waiting": "waiting-text",
       "txt-label-name": "label-name",
     };
@@ -95,12 +80,6 @@
       var el = document.getElementById(elId);
       if (el) el.textContent = t(map[elId]);
     });
-
-    var saveBtn = document.getElementById("btn-save-setup");
-    if (saveBtn) saveBtn.textContent = t("btn-save");
-
-    var settingsBtn = document.getElementById("btn-open-setup");
-    if (settingsBtn) settingsBtn.textContent = t("btn-settings");
 
     var saveNameBtn = document.getElementById("btn-save-name");
     if (saveNameBtn) saveNameBtn.textContent = t("btn-save");
