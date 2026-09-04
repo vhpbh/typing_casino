@@ -21,36 +21,49 @@
  *
  * SERVER-LOAD / SCALE DESIGN (read before changing the numbers below):
  *  - Word-counting and paste-detection are 100% local (Word.run calls stay
- *    on-device; they never touch Supabase). Only three things ever hit the
- *    network: (a) one Realtime "room" connection per active user used to
- *    both gate concurrency AND announce presence, (b) an infrequent batched
- *    progress sync, and (c) reading/clicking the single ad slot.
+ *    on-device; they never touch Supabase). The counter/balance you SEE
+ *    update instantly (see "instant feedback" below); what's batched is
+ *    only the network round-trip that makes it official.
  *  - Concurrency gate: Supabase's free plan caps Realtime at 200 concurrent
- *    connections project-wide. Rather than build a separate queuing table
- *    (which would itself cost reads/writes for every single user), this
- *    add-in *reuses that exact limit as the gate*: every active user holds
- *    one Realtime "presence" channel open. If the project is already at
- *    capacity, the connection attempt fails; the add-in then shows the
- *    waiting indicator and retries with backoff until a slot opens up -
- *    exactly the "201st user waits for the 1st to leave" behavior asked
- *    for, with zero extra database load.
- *  - Progress sync is batched to once a minute AND skipped entirely if
- *    nothing changed since the last sync, so an idle or slow typist costs
- *    the server nothing. A best-effort final sync also fires on page
- *    unload so the very last few words aren't lost.
- *  - The anonymous auth session is reused across app opens (Supabase persists
- *    it in local storage) instead of calling signInAnonymously() every time,
- *    which would otherwise silently create a brand-new user row - and count
- *    against the project's monthly-active-users quota - on every single
- *    open of the panel.
+ *    connections project-wide. Every active user holds one Realtime
+ *    "presence" channel open - that connection *is* the slot. If the
+ *    project is already at capacity, the connection attempt fails; the
+ *    add-in shows a waiting indicator and retries with backoff until a
+ *    slot opens up. That same channel is reused for postgres_changes
+ *    subscriptions (balance updates, open-bet lists), so none of that
+ *    costs an extra connection either.
+ *  - Progress/admin-stats sync is batched to once a minute and skipped
+ *    entirely if nothing changed. Currency (cents) earning is batched
+ *    separately and faster (see EARN_SYNC_MS) since it gates what you can
+ *    actually bet - but it's still a handful of calls a minute, not one
+ *    per keystroke.
+ *  - The anonymous auth session is reused across app opens instead of
+ *    calling signInAnonymously() every time, which would otherwise mint a
+ *    brand-new user row (and eat into the monthly-active-users quota) on
+ *    every single open of the panel.
+ *
+ * INSTANT FEEDBACK (word count + balance):
+ *  - In addition to the 150ms fallback timer, this add-in listens for
+ *    Office's DocumentSelectionChanged event, which fires the moment the
+ *    cursor moves - i.e. on essentially every keystroke - and triggers an
+ *    immediate re-check instead of waiting for the next timer tick. Word
+ *    counting and the balance shown at the top both update the instant a
+ *    word is completed; only the "make it official on the server" call
+ *    behind it is batched.
+ *  - The balance shown at the top is OPTIMISTIC: serverBalance + (letters
+ *    typed since the last confirmed earn sync). It's reconciled with the
+ *    real, server-confirmed balance every earn sync and via realtime
+ *    updates (e.g. after playing a casino game), so it can never drift for
+ *    long, but it never makes you wait on a network round trip either.
  */
 (function () {
   "use strict";
 
-  var POLL_MS = 300; // local only, no server cost
+  var POLL_MS = 150; // local-only fallback timer, no server cost
   var PASTE_CHAR_THRESHOLD = 25;
   var PASTE_MIN_TOKENS = 3;
-  var SYNC_EVERY_MS = 60000; // batch progress sync to once a minute
+  var SYNC_EVERY_MS = 60000; // batch admin/stats progress sync to once a minute
+  var EARN_SYNC_MS = 5000; // batch currency (cents) earning faster, since it gates betting
   var AD_CACHE_MS = 5 * 60 * 1000; // reuse the last-fetched ad for 5 minutes
   var ROOM_CHANNEL_NAME = "typing-casino-room";
   var BACKOFF_START_MS = 3000;
@@ -75,11 +88,17 @@
     lastSyncedLetters: -1,
     lastSyncedWords: -1,
     lastSyncAt: 0,
+    lastEarnSyncedLetters: 0,
+    lastEarnSyncAt: 0,
+    earnInFlight: false,
+    serverBalanceCents: 0,
     sb: null, // supabase client
     userId: null,
     roomConnected: false,
     roomChannel: null,
     roomBackoff: BACKOFF_START_MS,
+    pollTimer: null,
+    balanceListeners: [],
   };
 
   var el = {};
@@ -96,6 +115,7 @@
     el.adSlot = document.getElementById("ad-slot");
     el.adImage = document.getElementById("ad-image");
     el.adLink = document.getElementById("ad-link");
+    el.balanceTop = document.getElementById("balance-top-value");
   }
 
   function render() {
@@ -103,6 +123,22 @@
     el.wordsCount.textContent = state.wordsCount.toLocaleString();
     el.skippedMisspelled.textContent = state.skippedMisspelled.toLocaleString();
     el.skippedPasted.textContent = state.skippedPasted.toLocaleString();
+    renderBalance();
+  }
+
+  function currentOptimisticBalanceCents() {
+    var pendingLetters = Math.max(0, state.lettersCount - state.lastEarnSyncedLetters);
+    return state.serverBalanceCents + pendingLetters;
+  }
+
+  function renderBalance() {
+    var cents = currentOptimisticBalanceCents();
+    if (el.balanceTop) {
+      el.balanceTop.textContent = "$" + (cents / 100).toFixed(2);
+    }
+    state.balanceListeners.forEach(function (fn) {
+      try { fn(cents); } catch (e) { /* listener's problem, not ours */ }
+    });
   }
 
   // status: "off" | "waiting" | "on"
@@ -163,7 +199,7 @@
 
   function diffAndProcess(currentText) {
     var last = state.lastText;
-    if (currentText === last) return;
+    if (currentText === last) return false;
 
     if (currentText.indexOf(last) === 0) {
       var segment = currentText.slice(last.length);
@@ -176,25 +212,47 @@
     // Edits elsewhere in the document: just resync, see file header note #2.
 
     state.lastText = currentText;
+    return true;
   }
 
-  function pollLoop() {
-    if (!window.Spellcheck.isReady()) {
-      setTimeout(pollLoop, POLL_MS);
-      return;
-    }
+  var checkInFlight = false;
+  function checkDocumentNow() {
+    if (checkInFlight || !window.Spellcheck.isReady()) return;
+    checkInFlight = true;
     readDocumentText()
       .then(function (text) {
         diffAndProcess(text);
         render();
         maybeSync();
+        maybeFlushEarnings();
       })
       .catch(function (err) {
         console.error("Typing Casino: failed to read document text", err);
       })
       .finally(function () {
-        setTimeout(pollLoop, POLL_MS);
+        checkInFlight = false;
       });
+  }
+
+  function pollLoop() {
+    checkDocumentNow();
+    state.pollTimer = setTimeout(pollLoop, POLL_MS);
+  }
+
+  // Fires the moment the cursor moves - i.e. on essentially every keystroke -
+  // so word count / balance update immediately instead of waiting for the
+  // next 150ms timer tick.
+  function wireInstantSelectionHandler() {
+    try {
+      Office.context.document.addHandlerAsync(
+        Office.EventType.DocumentSelectionChanged,
+        function () {
+          checkDocumentNow();
+        }
+      );
+    } catch (e) {
+      console.error("Typing Casino: could not register selection handler", e);
+    }
   }
 
   // ---- Fixed project connection (no override, no settings UI) ----
@@ -220,7 +278,7 @@
     });
   }
 
-  // ---- Realtime "room": doubles as the concurrency gate and presence ----
+  // ---- Realtime "room": concurrency gate + presence + postgres_changes ----
   function connectToRoom() {
     if (state.roomChannel) {
       state.sb.removeChannel(state.roomChannel);
@@ -232,6 +290,37 @@
     var channel = state.sb.channel(ROOM_CHANNEL_NAME, {
       config: { presence: { key: state.userId } },
     });
+
+    // Live balance updates (casino wins/losses, earn syncs from *other* open
+    // sessions of the same user, etc.) - zero extra polling.
+    channel.on(
+      "postgres_changes",
+      { event: "UPDATE", schema: "public", table: "profiles", filter: "id=eq." + state.userId },
+      function (payload) {
+        if (payload.new && typeof payload.new.balance_cents === "number") {
+          state.serverBalanceCents = payload.new.balance_cents;
+          renderBalance();
+        }
+        if (window.Casino && window.Casino.onProfileRealtimeUpdate) {
+          window.Casino.onProfileRealtimeUpdate(payload.new);
+        }
+      }
+    );
+
+    // Casino PvP tables - forwarded to casino.js if it's listening, so open
+    // bet/pot lists update live instead of being polled.
+    ["bets", "rps_bets", "pots", "pot_entries"].forEach(function (table) {
+      channel.on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: table },
+        function (payload) {
+          if (window.Casino && window.Casino.onTableRealtimeUpdate) {
+            window.Casino.onTableRealtimeUpdate(table, payload);
+          }
+        }
+      );
+    });
+
     state.roomChannel = channel;
 
     channel.subscribe(function (status) {
@@ -262,9 +351,10 @@
     roomConnectedOnce = true;
     loadMyStats();
     loadAd();
+    loadCasinoProfile();
   }
 
-  // ---- Progress sync (batched + change-gated) ----
+  // ---- Progress sync (batched + change-gated; admin/stats side, unchanged) ----
   function maybeSync(force) {
     if (!state.sb || !state.userId || !state.roomConnected) return;
     var now = Date.now();
@@ -287,6 +377,45 @@
       });
   }
 
+  // ---- Currency earning (1 cent per letter), batched + flushable on demand ----
+  function maybeFlushEarnings() {
+    if (!state.roomConnected) return;
+    var now = Date.now();
+    if (now - state.lastEarnSyncAt < EARN_SYNC_MS) return;
+    flushEarnings();
+  }
+
+  // Returns a Promise that resolves once any pending letters have been
+  // reported (or immediately, if there's nothing to report / a flush is
+  // already in flight / we're rate limited). Casino games call this right
+  // before wagering, so the balance they're spending from is fresh.
+  function flushEarnings() {
+    if (!state.sb || !state.userId || state.earnInFlight) return Promise.resolve();
+    var pending = state.lettersCount - state.lastEarnSyncedLetters;
+    if (pending <= 0) return Promise.resolve();
+
+    state.earnInFlight = true;
+    state.lastEarnSyncAt = Date.now();
+    var claimedLetters = state.lettersCount;
+
+    return state.sb
+      .rpc("earn_from_typing_letters", { p_letters: pending })
+      .then(function (res) {
+        state.earnInFlight = false;
+        if (res.error) {
+          // Rate limited or otherwise failed - the optimistic balance still
+          // covers the user visually; we'll retry on the next tick.
+          return;
+        }
+        state.serverBalanceCents = Number(res.data) || state.serverBalanceCents;
+        state.lastEarnSyncedLetters = claimedLetters;
+        renderBalance();
+      })
+      .catch(function () {
+        state.earnInFlight = false;
+      });
+  }
+
   // Pull this user's previously-saved totals + name once per session, so
   // reopening the panel doesn't visually reset progress to zero (the server
   // never lost it - the local counter just didn't know about it yet).
@@ -301,6 +430,28 @@
       state.lastSyncedWords = state.wordsCount;
       render();
     });
+  }
+
+  // Pull this user's casino profile (username + real balance) once per
+  // session; the trigger in casino_schema.sql already created it.
+  function loadCasinoProfile() {
+    state.sb
+      .from("profiles")
+      .select("username, balance_cents")
+      .eq("id", state.userId)
+      .single()
+      .then(function (res) {
+        if (res.error || !res.data) return;
+        state.serverBalanceCents = Number(res.data.balance_cents) || 0;
+        state.lastEarnSyncedLetters = state.lettersCount; // don't re-award what's already reflected
+        if (!el.inputName.value && res.data.username) {
+          el.inputName.value = res.data.username;
+        }
+        renderBalance();
+        if (window.Casino && window.Casino.onProfileLoaded) {
+          window.Casino.onProfileLoaded(res.data);
+        }
+      });
   }
 
   // ---- Ad slot (fetched once per session, cached briefly across reopens) ----
@@ -339,15 +490,20 @@
     };
   }
 
-  // ---- Display name ----
+  // ---- Display name (updates BOTH the stats/admin name and the casino
+  //      leaderboard username, from the one input) ----
   function wireNameUi() {
     el.btnSaveName.addEventListener("click", function () {
       var name = el.inputName.value.trim();
-      if (!state.sb || !state.userId) return;
-      state.sb.rpc("set_display_name", { p_name: name }).then(function (res) {
-        if (res.error) {
-          console.error("Typing Casino: could not save name", res.error);
-          return;
+      if (!state.sb || !state.userId || !name) return;
+
+      Promise.all([
+        state.sb.rpc("set_display_name", { p_name: name }),
+        state.sb.rpc("set_username", { p_username: name }),
+      ]).then(function (results) {
+        var usernameRes = results[1];
+        if (usernameRes && !usernameRes.error && usernameRes.data) {
+          el.inputName.value = usernameRes.data; // reflect any de-dupe suffix
         }
         var original = el.btnSaveName.textContent;
         el.btnSaveName.textContent = window.I18N.t("name-saved");
@@ -376,17 +532,37 @@
       });
   }
 
-  // Best-effort final sync so the last unsynced words aren't lost. This is
-  // "fire and forget" - the page may close before it completes, and that's
-  // an acceptable tradeoff against polling the server more often.
+  // Best-effort final sync so the last unsynced words/letters aren't lost.
+  // This is "fire and forget" - the page may close before it completes, and
+  // that's an acceptable tradeoff against polling the server more often.
   function wireFinalSync() {
     document.addEventListener("visibilitychange", function () {
-      if (document.visibilityState === "hidden") maybeSync(true);
+      if (document.visibilityState === "hidden") {
+        maybeSync(true);
+        flushEarnings();
+      }
     });
     window.addEventListener("pagehide", function () {
       maybeSync(true);
+      flushEarnings();
     });
   }
+
+  // ---- Public API for casino.js (kept intentionally small) ----
+  window.TypingCasinoCore = {
+    getClient: function () { return state.sb; },
+    getUserId: function () { return state.userId; },
+    isRoomConnected: function () { return state.roomConnected; },
+    getOptimisticBalanceCents: currentOptimisticBalanceCents,
+    flushEarnings: flushEarnings,
+    onBalanceChange: function (fn) { state.balanceListeners.push(fn); },
+    __setServerBalance: function (cents) {
+      if (typeof cents === "number") {
+        state.serverBalanceCents = cents;
+        renderBalance();
+      }
+    },
+  };
 
   // ---- Boot ----
   Office.onReady(function () {
@@ -394,6 +570,7 @@
     cacheEls();
     wireNameUi();
     wireFinalSync();
+    wireInstantSelectionHandler();
     setConnBadge("off");
 
     window.Spellcheck.init();

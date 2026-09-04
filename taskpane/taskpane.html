@@ -14,9 +14,10 @@
     settings panel was deleted from the source. Bumping the number below
     forces every client to fetch the fresh files.
   -->
-  <link rel="stylesheet" href="taskpane.css?v=2" />
+  <link rel="stylesheet" href="taskpane.css?v=3" />
+  <link rel="stylesheet" href="casino.css?v=3" />
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
-  <script src="vendor.bundle.js?v=2"></script>
+  <script src="vendor.bundle.js?v=3"></script>
 </head>
 <body id="body" dir="ltr">
 
@@ -26,6 +27,11 @@
       <h1 id="txt-title">Typing Casino</h1>
       <div id="conn-badge" class="badge badge-off">…</div>
     </header>
+
+    <div class="balance-bar">
+      <span id="txt-balance-label" class="balance-label">Your balance</span>
+      <span id="balance-top-value" class="balance-value">$0.00</span>
+    </div>
 
     <section id="waiting-banner" class="waiting-banner hidden">
       <div class="spinner"></div>
@@ -60,6 +66,22 @@
       </div>
     </section>
 
+    <section class="casino-card">
+      <div class="casino-header">
+        <h2 id="txt-casino-title">Casino</h2>
+        <select id="casino-game-select"></select>
+      </div>
+      <div id="casino-game-container"></div>
+    </section>
+
+    <section class="casino-card">
+      <div class="casino-header">
+        <h2 id="txt-leaderboard-title">Leaderboard</h2>
+        <button id="btn-refresh-leaderboard" class="btn-small-icon" title="refresh">↻</button>
+      </div>
+      <div id="leaderboard-container"></div>
+    </section>
+
     <footer class="ad-slot" id="ad-slot" style="display:none;">
       <a id="ad-link" href="#" target="_blank" rel="noopener noreferrer">
         <img id="ad-image" alt="advertisement" />
@@ -68,8 +90,9 @@
 
   </div>
 
-  <script src="i18n.js?v=2"></script>
-  <script src="spellcheck.js?v=2"></script>
-  <script src="taskpane.js?v=2"></script>
+  <script src="i18n.js?v=3"></script>
+  <script src="spellcheck.js?v=3"></script>
+  <script src="taskpane.js?v=3"></script>
+  <script src="casino.js?v=3"></script>
 </body>
 </html>
