@@ -88,6 +88,9 @@
       "cx-pot-entries": "players",
       "cx-pot-draw": "Draw winner",
       "cx-pot-winner": "Winner",
+      "dict-error": "Word counting is stuck: the dictionary files (dict/en.aff, dict/en.dic, dict/he-words.txt) couldn't be loaded from the server. Retrying automatically — if this doesn't clear up, check that the taskpane/dict folder was uploaded to your host.",
+      "proofing-native": "Using Word's own spell-check",
+      "proofing-fallback": "Using built-in dictionary (Word's own spell-check isn't available on this platform)",
     },
     he: {
       "app-title": "קזינו ההקלדה",
@@ -165,6 +168,9 @@
       "cx-pot-entries": "משתתפים",
       "cx-pot-draw": "הגרל זוכה",
       "cx-pot-winner": "הזוכה",
+      "dict-error": "ספירת המילים תקועה: קבצי המילון (dict/en.aff, dict/en.dic, dict/he-words.txt) לא נטענו מהשרת. מנסים שוב אוטומטית - אם זה לא נפתר, בדוק שהתיקייה taskpane/dict הועלתה בפועל לאתר שלך.",
+      "proofing-native": "משתמש בבדיקת האיות המובנית של Word",
+      "proofing-fallback": "משתמש במילון פנימי (בדיקת האיות המובנית של Word אינה זמינה בפלטפורמה הזו)",
     },
   };
 
@@ -203,6 +209,7 @@
       "txt-balance-label": "balance-label",
       "txt-casino-title": "casino-title",
       "txt-leaderboard-title": "leaderboard-title",
+      "txt-dict-error": "dict-error",
     };
 
     Object.keys(map).forEach(function (elId) {

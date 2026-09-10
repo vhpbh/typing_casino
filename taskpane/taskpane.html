@@ -14,10 +14,10 @@
     settings panel was deleted from the source. Bumping the number below
     forces every client to fetch the fresh files.
   -->
-  <link rel="stylesheet" href="taskpane.css?v=3" />
-  <link rel="stylesheet" href="casino.css?v=3" />
+  <link rel="stylesheet" href="taskpane.css?v=6" />
+  <link rel="stylesheet" href="casino.css?v=6" />
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
-  <script src="vendor.bundle.js?v=3"></script>
+  <script src="vendor.bundle.js?v=6"></script>
 </head>
 <body id="body" dir="ltr">
 
@@ -36,6 +36,10 @@
     <section id="waiting-banner" class="waiting-banner hidden">
       <div class="spinner"></div>
       <div id="txt-waiting" class="waiting-text">Server is full right now — waiting for a spot to free up…</div>
+    </section>
+
+    <section id="dict-error-banner" class="dict-error-banner hidden">
+      <span id="txt-dict-error">Word counting is stuck: the dictionary files couldn't be loaded. Retrying…</span>
     </section>
 
     <section class="name-card">
@@ -66,6 +70,8 @@
       </div>
     </section>
 
+    <div id="proofing-source" class="proofing-source"></div>
+
     <section class="casino-card">
       <div class="casino-header">
         <h2 id="txt-casino-title">Casino</h2>
@@ -90,9 +96,9 @@
 
   </div>
 
-  <script src="i18n.js?v=3"></script>
-  <script src="spellcheck.js?v=3"></script>
-  <script src="taskpane.js?v=3"></script>
-  <script src="casino.js?v=3"></script>
+  <script src="i18n.js?v=6"></script>
+  <script src="spellcheck.js?v=6"></script>
+  <script src="taskpane.js?v=6"></script>
+  <script src="casino.js?v=6"></script>
 </body>
 </html>

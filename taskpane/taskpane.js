@@ -2,19 +2,37 @@
  * taskpane.js
  * Core logic for the Typing Casino Word add-in.
  *
- * KNOWN PLATFORM LIMITATIONS (read before relying on this in production):
- *  1. Office.js cannot read Word's native spell-check flags, and cannot see
- *     raw keystroke or paste events inside the document editing surface.
- *     Both "is this word correctly spelled" and "was this typed or pasted"
- *     are therefore approximated:
- *       - Spelling: checked against bundled offline dictionaries (see
- *         spellcheck.js) instead of Word's own proofing engine.
- *       - Typed vs. pasted: a short-interval LOCAL polling loop (no server
- *         calls involved) diffs the document's text. A large chunk of new
- *         text appearing between two polls (many words at once) is treated
- *         as a paste and excluded. A human typing normally only ever adds
- *         a word or two between polls, so this is a reliable heuristic in
- *         practice but not a mathematical guarantee.
+ * SPELLING SOURCE - two modes, auto-detected at startup:
+ *  1. NATIVE (preferred, when available): Word's JS API recently added
+ *     `document.spellingErrors` - a live RangeCollection of exactly the
+ *     words Word's own proofing engine has flagged. When this is
+ *     supported, a word counts as correct exactly when Word itself is NOT
+ *     underlining it - no bundled dictionary involved at all.
+ *     IMPORTANT CAVEATS about this API, since it's very new:
+ *       - It's currently under the "WordApiDesktop" requirement set, which
+ *         Microsoft documents as desktop-only (Windows/Mac/iPad) and
+ *         still preview-track for now - it is NOT guaranteed to exist on
+ *         Word on the web, on older Word builds, or outside Beta/Insiders
+ *         channels. This add-in checks Office.context.requirements before
+ *         ever touching it, and falls back automatically when unsupported.
+ *       - Word's proofing runs on its own internal timer, so there can be
+ *         a brief moment right after typing a word where Word hasn't
+ *         flagged it yet even if it's about to. In practice this
+ *         self-corrects within the next poll tick.
+ *  2. FALLBACK (bundled dictionaries, see spellcheck.js): used whenever
+ *     the native API isn't supported. Office.js otherwise has no way to
+ *     read Word's proofing state at all, so this is the best available
+ *     substitute on those platforms.
+ *
+ * OTHER KNOWN PLATFORM LIMITATIONS (read before relying on this in production):
+ *  1. Office.js cannot see raw keystroke or paste events inside the
+ *     document editing surface, so "was this typed or pasted" is
+ *     approximated: a short-interval LOCAL polling loop (no server calls
+ *     involved) diffs the document's text. A large chunk of new text
+ *     appearing between two polls (many words at once) is treated as a
+ *     paste and excluded. A human typing normally only ever adds a word or
+ *     two between polls, so this is a reliable heuristic in practice but
+ *     not a mathematical guarantee.
  *  2. If text is edited in the *middle* of the document (not appended at
  *     the end), this build simply re-syncs its baseline on the next poll
  *     without counting or penalizing anything from that edit.
@@ -99,6 +117,7 @@
     roomBackoff: BACKOFF_START_MS,
     pollTimer: null,
     balanceListeners: [],
+    nativeProofingSupported: false,
   };
 
   var el = {};
@@ -110,12 +129,14 @@
     el.skippedPasted = document.getElementById("skipped-pasted");
     el.connBadge = document.getElementById("conn-badge");
     el.waitingBanner = document.getElementById("waiting-banner");
+    el.dictErrorBanner = document.getElementById("dict-error-banner");
     el.inputName = document.getElementById("input-name");
     el.btnSaveName = document.getElementById("btn-save-name");
     el.adSlot = document.getElementById("ad-slot");
     el.adImage = document.getElementById("ad-image");
     el.adLink = document.getElementById("ad-link");
     el.balanceTop = document.getElementById("balance-top-value");
+    el.proofingSource = document.getElementById("proofing-source");
   }
 
   function render() {
@@ -149,13 +170,51 @@
     el.waitingBanner.classList.toggle("hidden", status !== "waiting");
   }
 
-  // ---- Word.js: read the whole document body as plain text ----
-  function readDocumentText() {
+  // ---- Feature detection: is Word's own document.spellingErrors usable here? ----
+  function detectNativeProofingSupport() {
+    try {
+      // Checked defensively against a couple of plausible versions since
+      // this is a very new, still-preview API set at the time of writing.
+      state.nativeProofingSupported =
+        Office.context.requirements.isSetSupported("WordApiDesktop", "1.4") ||
+        Office.context.requirements.isSetSupported("WordApiDesktop", "1.5");
+    } catch (e) {
+      state.nativeProofingSupported = false;
+    }
+  }
+
+  // ---- Word.js: read the document body text, and (when supported) Word's
+  //      own live list of words it's currently flagging as misspelled -
+  //      in a single batched Word.run/context.sync so this never costs two
+  //      round trips per poll tick. ----
+  function readDocumentState() {
     return Word.run(function (context) {
       var body = context.document.body;
       body.load("text");
+
+      var misspellingsRange = null;
+      if (state.nativeProofingSupported) {
+        try {
+          misspellingsRange = context.document.spellingErrors;
+          misspellingsRange.load("items/text");
+        } catch (e) {
+          // Property exists per the requirement-set check but threw anyway
+          // (e.g. host lied about support) - fall back for this session.
+          state.nativeProofingSupported = false;
+          misspellingsRange = null;
+        }
+      }
+
       return context.sync().then(function () {
-        return body.text;
+        var text = body.text;
+        var misspelledSet = null;
+        if (misspellingsRange) {
+          misspelledSet = new Set();
+          misspellingsRange.items.forEach(function (r) {
+            misspelledSet.add(r.text.trim());
+          });
+        }
+        return { text: text, misspelledSet: misspelledSet };
       });
     });
   }
@@ -170,7 +229,7 @@
     return text.split(/\s+/).filter(Boolean);
   }
 
-  function processSegment(segment, isPaste) {
+  function processSegment(segment, isPaste, misspelledSet) {
     state.pendingBuffer += segment;
 
     var endsWithBoundary = /\s$/.test(state.pendingBuffer);
@@ -188,7 +247,11 @@
         return;
       }
 
-      if (window.Spellcheck.isValidCompleteWord(word)) {
+      var isValid = misspelledSet
+        ? !misspelledSet.has(word) && !misspelledSet.has(raw.trim())
+        : window.Spellcheck.isValidCompleteWord(word);
+
+      if (isValid) {
         state.wordsCount++;
         state.lettersCount += word.length;
       } else {
@@ -197,7 +260,7 @@
     });
   }
 
-  function diffAndProcess(currentText) {
+  function diffAndProcess(currentText, misspelledSet) {
     var last = state.lastText;
     if (currentText === last) return false;
 
@@ -207,7 +270,7 @@
       var looksLikePaste =
         (segment.length > PASTE_CHAR_THRESHOLD && segTokens.length >= 2) ||
         segTokens.length >= PASTE_MIN_TOKENS;
-      processSegment(segment, looksLikePaste);
+      processSegment(segment, looksLikePaste, misspelledSet);
     }
     // Edits elsewhere in the document: just resync, see file header note #2.
 
@@ -217,17 +280,18 @@
 
   var checkInFlight = false;
   function checkDocumentNow() {
-    if (checkInFlight || !window.Spellcheck.isReady()) return;
+    if (checkInFlight) return;
+    if (!state.nativeProofingSupported && !window.Spellcheck.isReady()) return;
     checkInFlight = true;
-    readDocumentText()
-      .then(function (text) {
-        diffAndProcess(text);
+    readDocumentState()
+      .then(function (result) {
+        diffAndProcess(result.text, result.misspelledSet);
         render();
         maybeSync();
         maybeFlushEarnings();
       })
       .catch(function (err) {
-        console.error("Typing Casino: failed to read document text", err);
+        console.error("Typing Casino: failed to read document state", err);
       })
       .finally(function () {
         checkInFlight = false;
@@ -573,15 +637,29 @@
     wireInstantSelectionHandler();
     setConnBadge("off");
 
-    window.Spellcheck.init();
+    detectNativeProofingSupport();
+    if (state.nativeProofingSupported) {
+      // Word's own proofing engine is doing the work - no need to download
+      // or build the fallback dictionaries at all.
+      console.log("Typing Casino: using Word's native spelling-errors API.");
+      if (el.proofingSource) el.proofingSource.textContent = window.I18N.t("proofing-native");
+    } else {
+      if (el.proofingSource) el.proofingSource.textContent = window.I18N.t("proofing-fallback");
+      window.Spellcheck.init();
+      window.Spellcheck.onStatusChange(function (status) {
+        if (el.dictErrorBanner) {
+          el.dictErrorBanner.classList.toggle("hidden", status.ready || !status.error);
+        }
+      });
+    }
 
     loadSupabaseSettings().then(function (settings) {
       initSupabase(settings.url, settings.key);
     });
 
-    readDocumentText()
-      .then(function (text) {
-        state.lastText = text; // don't retroactively count text already in the doc
+    readDocumentState()
+      .then(function (result) {
+        state.lastText = result.text; // don't retroactively count text already in the doc
       })
       .finally(function () {
         pollLoop();
