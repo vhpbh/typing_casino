@@ -141,21 +141,38 @@
   }
 
   // ---- Coin flip ----
+  // Uses a scaleX(0) "edge-on" pinch instead of a true 3D rotateY flip:
+  // rotateY + backface-visibility doesn't render reliably in every Word
+  // WebView (confirmed: the "hidden" back face was bleeding through
+  // mirrored instead of being hidden). A 2D scale trick looks almost
+  // identical and only needs transforms every engine supports correctly.
   function createCoinWidget() {
     var wrap = el("div", "cx-coin-wrap");
-    var coin = el("div", "cx-coin");
-    coin.appendChild(el("div", "cx-coin-face cx-coin-front", "H"));
-    coin.appendChild(el("div", "cx-coin-face cx-coin-back", "T"));
+    var coin = el("div", "cx-coin2d cx-coin-heads", "H");
     wrap.appendChild(coin);
 
-    var spins = 0;
+    function setFace(isHeads) {
+      coin.textContent = isHeads ? "H" : "T";
+      coin.className = "cx-coin2d " + (isHeads ? "cx-coin-heads" : "cx-coin-tails");
+    }
+
     function flipTo(isHeads, onDone) {
-      spins += 1;
-      var extra = 6 + Math.floor(Math.random() * 3);
-      var finalDeg = spins * (extra * 180) + (isHeads ? 0 : 180);
-      coin.style.transition = "transform 1.3s cubic-bezier(0.2, 0.7, 0.3, 1)";
-      coin.style.transform = "rotateY(" + finalDeg + "deg)";
-      setTimeout(onDone, 1350);
+      var totalFlips = 7 + Math.floor(Math.random() * 3);
+      var i = 0;
+      function step() {
+        coin.style.transition = "transform 0.11s linear";
+        coin.style.transform = "scaleX(0)";
+        setTimeout(function () {
+          i++;
+          var landing = i >= totalFlips;
+          setFace(landing ? isHeads : i % 2 === 0);
+          coin.style.transition = "transform 0.11s linear";
+          coin.style.transform = "scaleX(1)";
+          if (!landing) setTimeout(step, 120);
+          else setTimeout(onDone, 160);
+        }, 110);
+      }
+      step();
     }
     return { wrap: wrap, flipTo: flipTo };
   }
@@ -295,31 +312,35 @@
 
   function createCardWidget() {
     var wrap = el("div", "cx-card-wrap");
-    var card = el("div", "cx-card");
-    var inner = el("div", "cx-card-inner");
-    var front = el("div", "cx-card-face cx-card-front", "?");
-    var back = el("div", "cx-card-face cx-card-back");
-    inner.appendChild(front);
-    inner.appendChild(back);
-    card.appendChild(inner);
+    var card = el("div", "cx-card2d cx-card-down", "?");
     wrap.appendChild(card);
 
-    function reveal(n, animate) {
+    function showFaceDown() {
+      card.className = "cx-card2d cx-card-down";
+      card.textContent = "?";
+    }
+    function showFaceUp(n) {
       var c = cardLabel(n);
-      back.innerHTML = "";
-      back.appendChild(el("div", "cx-card-rank" + (c.isRed ? " cx-card-red" : ""), c.rank));
-      back.appendChild(el("div", "cx-card-suit" + (c.isRed ? " cx-card-red" : ""), c.suit));
-      if (animate) {
-        card.style.transition = "transform 0.6s cubic-bezier(0.2,0.7,0.3,1)";
-        card.style.transform = "rotateY(180deg)";
-      } else {
-        card.style.transition = "none";
-        card.style.transform = "rotateY(180deg)";
-      }
+      card.className = "cx-card2d cx-card-up" + (c.isRed ? " cx-card-red" : "");
+      card.innerHTML = "";
+      card.appendChild(el("div", "cx-card-rank", c.rank));
+      card.appendChild(el("div", "cx-card-suit", c.suit));
+    }
+
+    function reveal(n, animate) {
+      if (!animate) { showFaceUp(n); return; }
+      card.style.transition = "transform 0.22s ease-in";
+      card.style.transform = "scaleX(0)";
+      setTimeout(function () {
+        showFaceUp(n);
+        card.style.transition = "transform 0.24s ease-out";
+        card.style.transform = "scaleX(1)";
+      }, 220);
     }
     function resetToFront() {
       card.style.transition = "none";
-      card.style.transform = "rotateY(0deg)";
+      card.style.transform = "scaleX(1)";
+      showFaceDown();
       void card.offsetHeight; // force reflow so the next reveal() animates
     }
     return { wrap: wrap, reveal: reveal, resetToFront: resetToFront };
@@ -661,8 +682,6 @@
           roundId = r.round_id;
           cardA.resetToFront();
           cardB.resetToFront();
-          var backFace = cardB.wrap.querySelector(".cx-card-back");
-          if (backFace) backFace.innerHTML = "";
           requestAnimationFrame(function () { cardA.reveal(r.card, true); });
           guessRow.classList.remove("hidden");
           startBtn.classList.add("hidden");

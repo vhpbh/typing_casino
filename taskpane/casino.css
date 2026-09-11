@@ -242,43 +242,35 @@
 }
 
 /* ---------------- Coin flip ---------------- */
+/* Uses scaleX(0)/scaleX(1) to fake a flip - see casino.js comment for why
+   this is used instead of rotateY + backface-visibility. */
 .cx-coin-wrap {
   display: flex;
   justify-content: center;
   padding: 14px 0;
-  perspective: 600px;
 }
 
-.cx-coin {
+.cx-coin2d {
   width: 76px;
   height: 76px;
-  position: relative;
-  transform-style: preserve-3d;
-}
-
-.cx-coin-face {
-  position: absolute;
-  width: 100%;
-  height: 100%;
   border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: 28px;
   font-weight: 800;
-  backface-visibility: hidden;
   box-shadow: inset 0 0 0 3px rgba(255, 255, 255, 0.15);
+  will-change: transform;
 }
 
-.cx-coin-front {
+.cx-coin-heads {
   background: linear-gradient(155deg, #facc15, #b45309);
   color: #3a2600;
 }
 
-.cx-coin-back {
+.cx-coin-tails {
   background: linear-gradient(155deg, #9ca3af, #4b5563);
   color: #1f2937;
-  transform: rotateY(180deg);
 }
 
 /* ---------------- Percentile dice ---------------- */
@@ -389,12 +381,13 @@
 .cx-crash-lose { color: var(--danger); }
 
 /* ---------------- Playing cards (Hi-Lo) ---------------- */
+/* Same scaleX(0)/scaleX(1) fake-flip technique as the coin, and for the
+   same reason - see casino.js. */
 .cx-hilo-cards {
   display: flex;
   gap: 14px;
   justify-content: center;
   padding: 8px 0 14px;
-  perspective: 800px;
 }
 
 .cx-card-wrap {
@@ -402,15 +395,7 @@
   height: 92px;
 }
 
-.cx-card {
-  width: 100%;
-  height: 100%;
-  position: relative;
-  transform-style: preserve-3d;
-}
-
-.cx-card-face {
-  position: absolute;
+.cx-card2d {
   width: 100%;
   height: 100%;
   border-radius: 8px;
@@ -418,20 +403,19 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  backface-visibility: hidden;
   font-weight: 800;
+  will-change: transform;
 }
 
-.cx-card-front {
+.cx-card-down {
   background: linear-gradient(155deg, #3fa9f5, #1d4ed8);
   color: #fff;
   font-size: 26px;
 }
 
-.cx-card-back {
+.cx-card-up {
   background: #f4f4f5;
   color: #111827;
-  transform: rotateY(180deg);
   gap: 2px;
 }
 
