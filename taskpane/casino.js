@@ -36,6 +36,295 @@
     return d;
   }
 
+  function showResolving(target) {
+    target.innerHTML = "";
+    var row = el("div", "cx-resolving");
+    row.appendChild(el("div", "cx-resolving-spinner"));
+    row.appendChild(document.createTextNode(t("cx-resolving")));
+    target.appendChild(row);
+  }
+
+  // ============================================================ VISUAL ANIMATION HELPERS
+  // Every animation here is purely cosmetic - the server has already fully
+  // decided the outcome by the time these run; the animation just spends a
+  // couple of seconds visually arriving at the answer that's already true.
+
+  function svgEl(svg) {
+    var wrap = document.createElement("div");
+    wrap.innerHTML = svg;
+    return wrap.firstElementChild;
+  }
+
+  function polarPoint(cx, cy, r, angleDeg) {
+    var rad = ((angleDeg - 90) * Math.PI) / 180;
+    return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) };
+  }
+
+  // ---- Wheel of Fortune ----
+  // Segments sized proportionally to the ACTUAL server-side probabilities
+  // (see spin_wheel in casino_schema.sql) so the wheel never lies about odds.
+  var WHEEL_SEGMENTS = [
+    { key: "JACKPOT", pct: 2, color: "#facc15", emoji: "💰" },
+    { key: "x3", pct: 10, color: "#f97316" },
+    { key: "x2", pct: 20, color: "#3fa9f5" },
+    { key: "x1", pct: 30, color: "#22c55e" },
+    { key: "x0.5", pct: 25, color: "#8b5cf6" },
+    { key: "BUST", pct: 13, color: "#f87171", emoji: "💥" },
+  ];
+
+  function buildWheelSvg() {
+    var cx = 100, cy = 100, r = 92;
+    var acc = 0;
+    var wedges = "";
+    WHEEL_SEGMENTS.forEach(function (seg) {
+      var start = acc * 3.6;
+      acc += seg.pct;
+      var end = acc * 3.6;
+      var p1 = polarPoint(cx, cy, r, start);
+      var p2 = polarPoint(cx, cy, r, end);
+      var largeArc = end - start > 180 ? 1 : 0;
+      wedges += '<path d="M' + cx + ',' + cy + ' L' + p1.x.toFixed(1) + ',' + p1.y.toFixed(1) +
+        ' A' + r + ',' + r + ' 0 ' + largeArc + ' 1 ' + p2.x.toFixed(1) + ',' + p2.y.toFixed(1) +
+        ' Z" fill="' + seg.color + '" stroke="#0f1115" stroke-width="1.5" />';
+    });
+    return svgEl(
+      '<svg viewBox="0 0 200 200" class="cx-wheel-svg">' + wedges +
+      '<circle cx="100" cy="100" r="14" fill="#0f1115" stroke="#2a2f3a" stroke-width="2" /></svg>'
+    );
+  }
+
+  function angleForSegment(key) {
+    var acc = 0;
+    for (var i = 0; i < WHEEL_SEGMENTS.length; i++) {
+      var seg = WHEEL_SEGMENTS[i];
+      var start = acc * 3.6;
+      acc += seg.pct;
+      var end = acc * 3.6;
+      if (seg.key === key) return (start + end) / 2;
+    }
+    return 0;
+  }
+
+  function createWheelWidget() {
+    var wrap = el("div", "cx-wheel-wrap");
+    var pointer = el("div", "cx-wheel-pointer", "▼");
+    var spinner = el("div", "cx-wheel-spinner");
+    var svg = buildWheelSvg();
+    spinner.appendChild(svg);
+    wrap.appendChild(spinner);
+    wrap.appendChild(pointer);
+
+    var legend = el("div", "cx-wheel-legend");
+    WHEEL_SEGMENTS.forEach(function (seg) {
+      var item = el("span", "cx-wheel-legend-item");
+      var swatch = el("span", "cx-wheel-swatch");
+      swatch.style.background = seg.color;
+      item.appendChild(swatch);
+      item.appendChild(document.createTextNode(" " + (seg.emoji || "") + seg.key));
+      legend.appendChild(item);
+    });
+
+    var rotation = 0;
+    function spinTo(segmentKey, onDone) {
+      var mid = angleForSegment(segmentKey);
+      var extraSpins = 4 + Math.floor(Math.random() * 2);
+      var targetWithinTurn = (360 - mid) % 360;
+      var currentWithinTurn = rotation % 360;
+      var delta = (targetWithinTurn - currentWithinTurn + 360) % 360;
+      rotation += extraSpins * 360 + delta;
+      spinner.style.transition = "transform 3.2s cubic-bezier(0.15, 0.65, 0.15, 1)";
+      spinner.style.transform = "rotate(" + rotation + "deg)";
+      setTimeout(onDone, 3250);
+    }
+
+    return { wrap: wrap, legend: legend, spinTo: spinTo };
+  }
+
+  // ---- Coin flip ----
+  function createCoinWidget() {
+    var wrap = el("div", "cx-coin-wrap");
+    var coin = el("div", "cx-coin");
+    coin.appendChild(el("div", "cx-coin-face cx-coin-front", "H"));
+    coin.appendChild(el("div", "cx-coin-face cx-coin-back", "T"));
+    wrap.appendChild(coin);
+
+    var spins = 0;
+    function flipTo(isHeads, onDone) {
+      spins += 1;
+      var extra = 6 + Math.floor(Math.random() * 3);
+      var finalDeg = spins * (extra * 180) + (isHeads ? 0 : 180);
+      coin.style.transition = "transform 1.3s cubic-bezier(0.2, 0.7, 0.3, 1)";
+      coin.style.transform = "rotateY(" + finalDeg + "deg)";
+      setTimeout(onDone, 1350);
+    }
+    return { wrap: wrap, flipTo: flipTo };
+  }
+
+  // ---- Percentile dice (1-100, "roll under N") ----
+  function createDiceWidget(threshold) {
+    var wrap = el("div", "cx-pdice-wrap");
+    var track = el("div", "cx-pdice-track");
+    var winZonePct = Math.max(0, Math.min(100, threshold - 1));
+    var winZone = el("div", "cx-pdice-win-zone");
+    winZone.style.width = winZonePct + "%";
+    var marker = el("div", "cx-pdice-marker");
+    marker.style.left = "0%";
+    track.appendChild(winZone);
+    track.appendChild(marker);
+    var bigNumber = el("div", "cx-pdice-number", "–");
+    wrap.appendChild(bigNumber);
+    wrap.appendChild(track);
+
+    function rollTo(finalValue, onDone) {
+      var ticks = 0;
+      var maxTicks = 16;
+      var iv = setInterval(function () {
+        ticks++;
+        var showVal = ticks >= maxTicks ? finalValue : 1 + Math.floor(Math.random() * 100);
+        bigNumber.textContent = showVal;
+        marker.style.transition = "left 0.08s linear";
+        marker.style.left = Math.max(1, Math.min(99, showVal)) + "%";
+        if (ticks >= maxTicks) {
+          clearInterval(iv);
+          marker.style.transition = "left 0.3s ease-out";
+          setTimeout(onDone, 350);
+        }
+      }, 60);
+    }
+    return { wrap: wrap, rollTo: rollTo };
+  }
+
+  // ---- Slot reels ----
+  var SLOT_STRIP = ["🍒", "🍋", "🔔", "⭐", "💎", "7️⃣"];
+
+  function createSlotsWidget() {
+    var wrap = el("div", "cx-slots-wrap");
+    var reelEls = [];
+    for (var i = 0; i < 3; i++) {
+      var win = el("div", "cx-slot-window");
+      var strip = el("div", "cx-slot-strip");
+      win.appendChild(strip);
+      wrap.appendChild(win);
+      reelEls.push(strip);
+    }
+
+    function spin(finalSymbols, onDone) {
+      var done = 0;
+      reelEls.forEach(function (strip, i) {
+        var sequence = [];
+        var loops = 3 + i; // stagger so reels stop one after another
+        for (var l = 0; l < loops; l++) {
+          for (var s = 0; s < SLOT_STRIP.length; s++) sequence.push(SLOT_STRIP[s]);
+        }
+        sequence.push(finalSymbols[i]);
+        strip.innerHTML = "";
+        sequence.forEach(function (sym) { strip.appendChild(el("div", "cx-slot-cell", sym)); });
+        strip.style.transition = "none";
+        strip.style.transform = "translateY(0)";
+        // force reflow so the transition below actually animates from 0
+        void strip.offsetHeight;
+        var duration = 1.1 + i * 0.4;
+        strip.style.transition = "transform " + duration + "s cubic-bezier(0.1,0.7,0.2,1)";
+        strip.style.transform = "translateY(-" + (sequence.length - 1) * 44 + "px)";
+        setTimeout(function () {
+          done++;
+          if (done === reelEls.length) onDone();
+        }, duration * 1000 + 80);
+      });
+    }
+    return { wrap: wrap, spin: spin };
+  }
+
+  // ---- Crash graph ----
+  function createCrashWidget(cashoutAt) {
+    var wrap = el("div", "cx-crash-wrap");
+    var svg = svgEl('<svg viewBox="0 0 220 110" class="cx-crash-svg">' +
+      '<line x1="0" y1="109" x2="220" y2="109" stroke="#2a2f3a" stroke-width="1"/>' +
+      '<path id="cx-crash-path" d="M0,109" fill="none" stroke="#3fa9f5" stroke-width="3"/>' +
+      '</svg>');
+    var path = svg.querySelector("#cx-crash-path");
+    var big = el("div", "cx-crash-multiplier", "1.00×");
+    wrap.appendChild(svg);
+    wrap.appendChild(big);
+
+    function xFor(t) { return t * 220; }
+    function yFor(mult) { return Math.max(4, 109 - Math.min(105, (mult - 1) * 22)); }
+
+    function runTo(crashPoint, won, onDone) {
+      var duration = 1800;
+      var start = null;
+      var maxMult = crashPoint;
+      function frame(ts) {
+        if (!start) start = ts;
+        var t = Math.min(1, (ts - start) / duration);
+        var mult = 1 + (maxMult - 1) * t;
+        var steps = 24;
+        var d = "M0,109";
+        for (var i = 1; i <= steps * t; i++) {
+          var tt = i / steps;
+          var m = 1 + (maxMult - 1) * tt;
+          d += " L" + xFor(tt).toFixed(1) + "," + yFor(m).toFixed(1);
+        }
+        path.setAttribute("d", d);
+        big.textContent = mult.toFixed(2) + "×";
+        big.className = "cx-crash-multiplier";
+        if (t < 1) {
+          requestAnimationFrame(frame);
+        } else {
+          big.textContent = crashPoint.toFixed(2) + "× " + (won ? "" : "💥");
+          big.className = "cx-crash-multiplier " + (won ? "cx-crash-win" : "cx-crash-lose");
+          setTimeout(onDone, 300);
+        }
+      }
+      requestAnimationFrame(frame);
+    }
+    return { wrap: wrap, runTo: runTo };
+  }
+
+  // ---- Playing card flip (Hi-Lo) ----
+  var CARD_RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"];
+  var CARD_SUITS = ["♠", "♥", "♦", "♣"];
+  function cardLabel(n) {
+    // n is 1-13 from the server; suit is purely decorative (server doesn't
+    // track one) - picked deterministically from n so it's at least stable.
+    var rank = CARD_RANKS[(n - 1) % 13];
+    var suit = CARD_SUITS[n % 4];
+    var isRed = suit === "♥" || suit === "♦";
+    return { rank: rank, suit: suit, isRed: isRed };
+  }
+
+  function createCardWidget() {
+    var wrap = el("div", "cx-card-wrap");
+    var card = el("div", "cx-card");
+    var inner = el("div", "cx-card-inner");
+    var front = el("div", "cx-card-face cx-card-front", "?");
+    var back = el("div", "cx-card-face cx-card-back");
+    inner.appendChild(front);
+    inner.appendChild(back);
+    card.appendChild(inner);
+    wrap.appendChild(card);
+
+    function reveal(n, animate) {
+      var c = cardLabel(n);
+      back.innerHTML = "";
+      back.appendChild(el("div", "cx-card-rank" + (c.isRed ? " cx-card-red" : ""), c.rank));
+      back.appendChild(el("div", "cx-card-suit" + (c.isRed ? " cx-card-red" : ""), c.suit));
+      if (animate) {
+        card.style.transition = "transform 0.6s cubic-bezier(0.2,0.7,0.3,1)";
+        card.style.transform = "rotateY(180deg)";
+      } else {
+        card.style.transition = "none";
+        card.style.transform = "rotateY(180deg)";
+      }
+    }
+    function resetToFront() {
+      card.style.transition = "none";
+      card.style.transform = "rotateY(0deg)";
+      void card.offsetHeight; // force reflow so the next reveal() animates
+    }
+    return { wrap: wrap, reveal: reveal, resetToFront: resetToFront };
+  }
+
   // Every wager first flushes any pending letter-earnings so the balance
   // being spent from is fresh, then reads the just-confirmed balance.
   function withFreshBalance(cb) {
@@ -108,6 +397,10 @@
   // ============================================================ HOUSE GAMES
 
   function renderWheel(root) {
+    var wheelWidget = createWheelWidget();
+    root.appendChild(wheelWidget.wrap);
+    root.appendChild(wheelWidget.legend);
+
     var sr = stakeInputRow(100);
     var btn = el("button", "btn-primary cx-btn", t("cx-wheel-spin"));
     var out = el("div", "cx-out");
@@ -122,21 +415,26 @@
       out.innerHTML = "";
       withFreshBalance(function () {
         sb().rpc("spin_wheel", { p_stake: stake }).then(function (res) {
-          btn.disabled = false;
-          if (res.error) return showRpcError(out, res.error);
+          if (res.error) { btn.disabled = false; return showRpcError(out, res.error); }
           var row = Array.isArray(res.data) ? res.data[0] : res.data;
-          var label = row.segment_label === "BUST" ? t("cx-seg-bust") :
-                      row.segment_label === "JACKPOT" ? t("cx-seg-jackpot") : row.segment_label;
-          var kind = row.payout_cents > stake ? "win" : row.payout_cents > 0 ? "push" : "lose";
-          out.innerHTML = "";
-          out.appendChild(resultBanner(kind, label + " · " + fmtCents(row.payout_cents)));
-          onBalanceKnown(row.new_balance);
+          wheelWidget.spinTo(row.segment_label, function () {
+            btn.disabled = false;
+            var label = row.segment_label === "BUST" ? t("cx-seg-bust") :
+                        row.segment_label === "JACKPOT" ? t("cx-seg-jackpot") : row.segment_label;
+            var kind = row.payout_cents > stake ? "win" : row.payout_cents > 0 ? "push" : "lose";
+            out.innerHTML = "";
+            out.appendChild(resultBanner(kind, label + " · " + fmtCents(row.payout_cents)));
+            onBalanceKnown(row.new_balance);
+          });
         });
       });
     });
   }
 
   function renderCoinflipHouse(root) {
+    var coinWidget = createCoinWidget();
+    root.appendChild(coinWidget.wrap);
+
     var sr = stakeInputRow(100);
     var choiceRow = el("div", "cx-row");
     var choice = "heads";
@@ -162,17 +460,20 @@
       var stake = parseInt(sr.input.value, 10);
       if (!stake || stake <= 0) return;
       btn.disabled = true;
+      out.innerHTML = "";
       withFreshBalance(function () {
         sb().rpc("play_coinflip_house", { p_stake: stake, p_choice: choice }).then(function (res) {
-          btn.disabled = false;
-          if (res.error) return showRpcError(out, res.error);
+          if (res.error) { btn.disabled = false; return showRpcError(out, res.error); }
           var row = Array.isArray(res.data) ? res.data[0] : res.data;
-          var won = row.payout_cents > 0;
-          var label = (row.result === "heads" ? t("cx-heads") : t("cx-tails")) + " · " +
-            (won ? t("cx-win") : t("cx-lose")) + " · " + fmtCents(row.payout_cents);
-          out.innerHTML = "";
-          out.appendChild(resultBanner(won ? "win" : "lose", label));
-          onBalanceKnown(row.new_balance);
+          coinWidget.flipTo(row.result === "heads", function () {
+            btn.disabled = false;
+            var won = row.payout_cents > 0;
+            var label = (row.result === "heads" ? t("cx-heads") : t("cx-tails")) + " · " +
+              (won ? t("cx-win") : t("cx-lose")) + " · " + fmtCents(row.payout_cents);
+            out.innerHTML = "";
+            out.appendChild(resultBanner(won ? "win" : "lose", label));
+            onBalanceKnown(row.new_balance);
+          });
         });
       });
     });
@@ -186,6 +487,16 @@
     range.type = "number"; range.min = "2"; range.max = "98"; range.value = "50";
     row2.appendChild(label2); row2.appendChild(range);
 
+    var diceWidget = createDiceWidget(50);
+    root.appendChild(diceWidget.wrap);
+
+    range.addEventListener("input", function () {
+      var under = parseInt(range.value, 10) || 50;
+      var newWidget = createDiceWidget(under);
+      root.replaceChild(newWidget.wrap, diceWidget.wrap);
+      diceWidget = newWidget;
+    });
+
     var btn = el("button", "btn-primary cx-btn", t("cx-play"));
     var out = el("div", "cx-out");
     root.appendChild(sr.row);
@@ -198,28 +509,32 @@
       var under = parseInt(range.value, 10);
       if (!stake || stake <= 0 || !under || under < 2 || under > 98) return;
       btn.disabled = true;
+      out.innerHTML = "";
       withFreshBalance(function () {
         sb().rpc("play_dice_house", { p_stake: stake, p_roll_under: under }).then(function (res) {
-          btn.disabled = false;
-          if (res.error) return showRpcError(out, res.error);
+          if (res.error) { btn.disabled = false; return showRpcError(out, res.error); }
           var r = Array.isArray(res.data) ? res.data[0] : res.data;
-          var label = t("cx-roll-result") + ": " + r.roll + " · " +
-            (r.won ? t("cx-win") : t("cx-lose")) + " · " + fmtCents(r.payout_cents);
-          out.innerHTML = "";
-          out.appendChild(resultBanner(r.won ? "win" : "lose", label));
-          onBalanceKnown(r.new_balance);
+          diceWidget.rollTo(r.roll, function () {
+            btn.disabled = false;
+            var label = t("cx-roll-result") + ": " + r.roll + " · " +
+              (r.won ? t("cx-win") : t("cx-lose")) + " · " + fmtCents(r.payout_cents);
+            out.innerHTML = "";
+            out.appendChild(resultBanner(r.won ? "win" : "lose", label));
+            onBalanceKnown(r.new_balance);
+          });
         });
       });
     });
   }
 
   function renderSlots(root) {
+    var slotsWidget = createSlotsWidget();
+    root.appendChild(slotsWidget.wrap);
+
     var sr = stakeInputRow(100);
     var btn = el("button", "btn-primary cx-btn", t("cx-play"));
-    var reels = el("div", "cx-reels", "🍒 🍋 🔔");
     var out = el("div", "cx-out");
     root.appendChild(sr.row);
-    root.appendChild(reels);
     root.appendChild(btn);
     root.appendChild(out);
 
@@ -227,29 +542,34 @@
       var stake = parseInt(sr.input.value, 10);
       if (!stake || stake <= 0) return;
       btn.disabled = true;
+      out.innerHTML = "";
       withFreshBalance(function () {
         sb().rpc("play_slots_house", { p_stake: stake }).then(function (res) {
-          btn.disabled = false;
-          if (res.error) return showRpcError(out, res.error);
+          if (res.error) { btn.disabled = false; return showRpcError(out, res.error); }
           var r = Array.isArray(res.data) ? res.data[0] : res.data;
-          reels.textContent = r.reels.join("  ");
-          var won = r.payout_cents > stake;
-          out.innerHTML = "";
-          out.appendChild(resultBanner(won ? "win" : r.payout_cents > 0 ? "push" : "lose", fmtCents(r.payout_cents)));
-          onBalanceKnown(r.new_balance);
+          slotsWidget.spin(r.reels, function () {
+            btn.disabled = false;
+            var won = r.payout_cents > stake;
+            out.innerHTML = "";
+            out.appendChild(resultBanner(won ? "win" : r.payout_cents > 0 ? "push" : "lose", fmtCents(r.payout_cents)));
+            onBalanceKnown(r.new_balance);
+          });
         });
       });
     });
   }
 
   function renderCrash(root) {
-    var sr = stakeInputRow(100);
     var row2 = el("div", "cx-row");
     var label2 = el("label", "cx-label", t("cx-cashout-at"));
     var cashout = el("input", "cx-input");
     cashout.type = "number"; cashout.min = "1.01"; cashout.max = "100"; cashout.step = "0.01"; cashout.value = "2.00";
     row2.appendChild(label2); row2.appendChild(cashout);
 
+    var crashWidget = createCrashWidget();
+    root.appendChild(crashWidget.wrap);
+
+    var sr = stakeInputRow(100);
     var btn = el("button", "btn-primary cx-btn", t("cx-play"));
     var out = el("div", "cx-out");
     root.appendChild(sr.row);
@@ -262,22 +582,32 @@
       var target = parseFloat(cashout.value);
       if (!stake || stake <= 0 || !target || target < 1.01) return;
       btn.disabled = true;
+      out.innerHTML = "";
       withFreshBalance(function () {
         sb().rpc("play_crash_house", { p_stake: stake, p_cashout_at: target }).then(function (res) {
-          btn.disabled = false;
-          if (res.error) return showRpcError(out, res.error);
+          if (res.error) { btn.disabled = false; return showRpcError(out, res.error); }
           var r = Array.isArray(res.data) ? res.data[0] : res.data;
-          var label = t("cx-crash-point") + r.crash_point + " · " +
-            (r.won ? t("cx-win") : t("cx-lose")) + " · " + fmtCents(r.payout_cents);
-          out.innerHTML = "";
-          out.appendChild(resultBanner(r.won ? "win" : "lose", label));
-          onBalanceKnown(r.new_balance);
+          crashWidget.runTo(r.crash_point, r.won, function () {
+            btn.disabled = false;
+            var label = t("cx-crash-point") + r.crash_point + " · " +
+              (r.won ? t("cx-win") : t("cx-lose")) + " · " + fmtCents(r.payout_cents);
+            out.innerHTML = "";
+            out.appendChild(resultBanner(r.won ? "win" : "lose", label));
+            onBalanceKnown(r.new_balance);
+          });
         });
       });
     });
   }
 
   function renderHilo(root) {
+    var cardA = createCardWidget();
+    var cardB = createCardWidget();
+    var cardsRow = el("div", "cx-hilo-cards");
+    cardsRow.appendChild(cardA.wrap);
+    cardsRow.appendChild(cardB.wrap);
+    root.appendChild(cardsRow);
+
     var sr = stakeInputRow(100);
     var startBtn = el("button", "btn-primary cx-btn", t("cx-hilo-start"));
     var out = el("div", "cx-out");
@@ -298,19 +628,21 @@
       if (!roundId) return;
       higherBtn.disabled = true; lowerBtn.disabled = true;
       sb().rpc("guess_hilo_house", { p_round_id: roundId, p_guess: direction }).then(function (res) {
-        higherBtn.disabled = false; lowerBtn.disabled = false;
-        if (res.error) return showRpcError(out, res.error);
+        if (res.error) { higherBtn.disabled = false; lowerBtn.disabled = false; return showRpcError(out, res.error); }
         var r = Array.isArray(res.data) ? res.data[0] : res.data;
-        var kind = r.outcome === "win" ? "win" : r.outcome === "push" ? "push" : "lose";
-        var label = t("cx-hilo-card") + " B: " + r.card_b + " · " +
-          (r.outcome === "win" ? t("cx-hilo-outcome-win") : r.outcome === "push" ? t("cx-hilo-outcome-push") : t("cx-hilo-outcome-lose")) +
-          " · " + fmtCents(r.payout_cents);
-        out.innerHTML = "";
-        out.appendChild(resultBanner(kind, label));
-        onBalanceKnown(r.new_balance);
-        roundId = null;
-        guessRow.classList.add("hidden");
-        startBtn.classList.remove("hidden");
+        cardB.reveal(r.card_b, true);
+        setTimeout(function () {
+          higherBtn.disabled = false; lowerBtn.disabled = false;
+          var kind = r.outcome === "win" ? "win" : r.outcome === "push" ? "push" : "lose";
+          var label = (r.outcome === "win" ? t("cx-hilo-outcome-win") : r.outcome === "push" ? t("cx-hilo-outcome-push") : t("cx-hilo-outcome-lose")) +
+            " · " + fmtCents(r.payout_cents);
+          out.innerHTML = "";
+          out.appendChild(resultBanner(kind, label));
+          onBalanceKnown(r.new_balance);
+          roundId = null;
+          guessRow.classList.add("hidden");
+          startBtn.classList.remove("hidden");
+        }, 650);
       });
     }
     higherBtn.addEventListener("click", function () { guess("higher"); });
@@ -320,14 +652,18 @@
       var stake = parseInt(sr.input.value, 10);
       if (!stake || stake <= 0) return;
       startBtn.disabled = true;
+      out.innerHTML = "";
       withFreshBalance(function () {
         sb().rpc("start_hilo_house", { p_stake: stake }).then(function (res) {
           startBtn.disabled = false;
           if (res.error) return showRpcError(out, res.error);
           var r = Array.isArray(res.data) ? res.data[0] : res.data;
           roundId = r.round_id;
-          out.innerHTML = "";
-          out.appendChild(resultBanner("info", t("cx-hilo-card") + " A: " + r.card));
+          cardA.resetToFront();
+          cardB.resetToFront();
+          var backFace = cardB.wrap.querySelector(".cx-card-back");
+          if (backFace) backFace.innerHTML = "";
+          requestAnimationFrame(function () { cardA.reveal(r.card, true); });
           guessRow.classList.remove("hidden");
           startBtn.classList.add("hidden");
           onBalanceKnown(r.new_balance);
@@ -380,6 +716,7 @@
             var actionBtn = el("button", "cx-toggle", isMine ? t("cx-cancel") : t("cx-join"));
             actionBtn.addEventListener("click", function () {
               actionBtn.disabled = true;
+              if (!isMine) showResolving(out);
               var call = isMine
                 ? sb().rpc("cancel_pvp_bet", { p_bet_id: bet.id })
                 : Core.flushEarnings().then(function () { return sb().rpc("join_pvp_bet", { p_bet_id: bet.id }); });
@@ -505,6 +842,7 @@
                   out.appendChild(resultBanner("lose", t("cx-error")));
                   return;
                 }
+                showResolving(out);
                 sb().rpc("reveal_rps_bet", { p_id: bet.id, p_move: saved.move, p_salt: saved.salt }).then(function (res2) {
                   if (res2.error) return showRpcError(out, res2.error);
                   localStorage.removeItem(rpsSaltKey(bet.id));
@@ -648,6 +986,7 @@
 
     drawBtn.addEventListener("click", function () {
       drawBtn.disabled = true;
+      showResolving(out);
       sb().rpc("draw_pot", { p_pot_id: pot.id }).then(function (res) {
         drawBtn.disabled = false;
         if (res.error) return showRpcError(out, res.error);

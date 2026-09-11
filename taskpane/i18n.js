@@ -44,6 +44,7 @@
       "cx-cancel": "Cancel",
       "cx-reveal": "Reveal",
       "cx-open-bets": "Open bets",
+      "cx-resolving": "Resolving…",
 
       "cx-game-wheel": "🎡 Wheel of Fortune",
       "cx-game-coinflip": "🪙 Coinflip (vs house)",
@@ -124,6 +125,7 @@
       "cx-cancel": "בטל",
       "cx-reveal": "חשוף מהלך",
       "cx-open-bets": "הימורים פתוחים",
+      "cx-resolving": "מתבצע חישוב…",
 
       "cx-game-wheel": "🎡 גלגל המזל",
       "cx-game-coinflip": "🪙 הטלת מטבע (מול הבית)",

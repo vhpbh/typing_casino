@@ -1,0 +1,24 @@
+{
+  "name": "word-typing-casino",
+  "version": "1.0.0",
+  "description": "Word add-in: earn letters for correctly-typed words, with an admin-managed ad slot.",
+  "main": "index.js",
+  "scripts": {
+    "build:vendor": "esbuild src/vendor-entry.js --bundle --format=iife --outfile=taskpane/vendor.bundle.js --minify",
+    "serve": "node server.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.114.0",
+    "dictionary-en": "^4.0.0",
+    "dictionary-he": "^2.0.0",
+    "esbuild": "^0.28.2",
+    "nspell": "^2.1.5"
+  },
+  "devDependencies": {
+    "office-addin-dev-certs": "^2.0.10"
+  }
+}
