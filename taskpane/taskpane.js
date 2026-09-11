@@ -183,11 +183,25 @@
     }
   }
 
+  var fallbackDictStarted = false;
+  function ensureFallbackDictionaryStarted() {
+    if (fallbackDictStarted) return;
+    fallbackDictStarted = true;
+    if (el.proofingSource) el.proofingSource.textContent = window.I18N.t("proofing-fallback");
+    window.Spellcheck.init();
+    window.Spellcheck.onStatusChange(function (status) {
+      if (el.dictErrorBanner) {
+        el.dictErrorBanner.classList.toggle("hidden", status.ready || !status.error);
+      }
+    });
+  }
+
   // ---- Word.js: read the document body text, and (when supported) Word's
   //      own live list of words it's currently flagging as misspelled -
   //      in a single batched Word.run/context.sync so this never costs two
   //      round trips per poll tick. ----
   function readDocumentState() {
+    var attemptedNative = state.nativeProofingSupported;
     return Word.run(function (context) {
       var body = context.document.body;
       body.load("text");
@@ -201,6 +215,7 @@
           // Property exists per the requirement-set check but threw anyway
           // (e.g. host lied about support) - fall back for this session.
           state.nativeProofingSupported = false;
+          ensureFallbackDictionaryStarted();
           misspellingsRange = null;
         }
       }
@@ -216,6 +231,19 @@
         }
         return { text: text, misspelledSet: misspelledSet };
       });
+    }).catch(function (err) {
+      if (attemptedNative && state.nativeProofingSupported) {
+        // The requirement-set check said this should work, but the actual
+        // sync failed (e.g. the property isn't really implemented on this
+        // build despite reporting support for it). Disable native mode,
+        // start the fallback dictionary, and retry this same check with it
+        // instead of silently doing nothing forever.
+        console.error("Typing Casino: native proofing failed at runtime, switching to the built-in dictionary", err);
+        state.nativeProofingSupported = false;
+        ensureFallbackDictionaryStarted();
+        return readDocumentState();
+      }
+      throw err;
     });
   }
 
@@ -640,17 +668,13 @@
     detectNativeProofingSupport();
     if (state.nativeProofingSupported) {
       // Word's own proofing engine is doing the work - no need to download
-      // or build the fallback dictionaries at all.
+      // or build the fallback dictionaries at all (readDocumentState will
+      // automatically switch to the fallback if this turns out not to
+      // actually work at runtime despite the requirement-set check).
       console.log("Typing Casino: using Word's native spelling-errors API.");
       if (el.proofingSource) el.proofingSource.textContent = window.I18N.t("proofing-native");
     } else {
-      if (el.proofingSource) el.proofingSource.textContent = window.I18N.t("proofing-fallback");
-      window.Spellcheck.init();
-      window.Spellcheck.onStatusChange(function (status) {
-        if (el.dictErrorBanner) {
-          el.dictErrorBanner.classList.toggle("hidden", status.ready || !status.error);
-        }
-      });
+      ensureFallbackDictionaryStarted();
     }
 
     loadSupabaseSettings().then(function (settings) {
